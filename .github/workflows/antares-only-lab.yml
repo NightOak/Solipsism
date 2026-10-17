@@ -1,0 +1,92 @@
+# Manual-only development build. Never publishes a release or installs onto a phone.
+name: Antares-only isolated test build
+on:
+  push:
+    branches:
+      - fix/antares-only-lab
+    paths:
+      - .github/workflows/antares-only-lab.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-android-lab:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout pinned Solipsism fork development branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Checkout pinned Antares 0.4.0 source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Kenneth-Cho-InfoSec/Antares
+          ref: 0dd9e2ab9f8250ba65622c9a9ee3cc926f37c2a0
+          persist-credentials: false
+          submodules: recursive
+          path: native-engine
+      - name: Review disk availability
+        run: df -h .
+      - name: Install LLVM 20.1
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0
+        with:
+          version: '20.1'
+      - name: Install pinned Python for Antares bootstrap
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version-file: native-engine/.python-version
+      - name: Install pinned uv for Antares Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.11.16'
+      - name: Run host tagged-pointer representation controls
+        run: |
+          cc -Wall -Wextra -Werror -std=c11 tests/test_tagged_pointer_representation.c -o /tmp/antares-tagged-pointer-test
+          /tmp/antares-tagged-pointer-test
+      - name: Set up Java 17 for Servo Android build
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: 'platform-tools platforms;android-34 platforms;android-36 build-tools;36.0.0'
+      - name: Install Android NDK r29
+        id: ndk
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
+        with:
+          ndk-version: r29
+      - name: Bootstrap exact Antares source and toolchain
+        working-directory: native-engine
+        run: |
+          rustup show
+          cargo install --path support/crown
+          sudo apt-get update
+          ./mach bootstrap --yes --skip-lints --skip-nextest
+      - name: Verify and apply tagged-pointer native patch
+        working-directory: native-engine
+        run: bash ../ci/prepare-native.sh
+      - name: Compile patched Servo for Pixel 8 Pro ARM64
+        working-directory: native-engine
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          CARGO_INCREMENTAL: '0'
+          RUST_BACKTRACE: '1'
+        run: ./mach build --use-crown --locked --target aarch64-linux-android --profile checked-release
+      - name: Set up Java 21 for Solipsism Gradle build
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Run Android unit tests and assemble isolated Antares-only app
+        run: bash ci/build-lab-app.sh
+      - name: Upload isolated candidate and validation evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: antares-only-lab-arm64-unverified-runtime
+          path: build-evidence/
+          if-no-files-found: error
+          retention-days: 14
