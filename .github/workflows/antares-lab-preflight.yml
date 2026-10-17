@@ -1,0 +1,31 @@
+name: Antares-only runner preflight
+on:
+  push:
+    branches:
+      - fix/antares-only-lab
+    paths:
+      - .github/workflows/antares-lab-preflight.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-runner:
+    name: Verify isolated development runner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - name: Checkout isolated development branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify source and baseline native library
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "${GITHUB_REF}" = 'refs/heads/fix/antares-only-lab'
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          git merge-base --is-ancestor ff82344988b3e783feddedaeb01d913c945fca85 HEAD
+          test -f app/src/main/jniLibs/arm64-v8a/libservoshell.so
+          readelf -h app/src/main/jniLibs/arm64-v8a/libservoshell.so | grep -q 'Machine:.*AArch64'
+          sha256sum app/src/main/jniLibs/arm64-v8a/libservoshell.so
+          echo 'Preflight only; no source patch, build, release, or installation performed.'
