@@ -1,0 +1,29 @@
+--- a/mozjs-sys/src/jsval.rs
++++ b/mozjs-sys/src/jsval.rs
+@@ -212,7 +212,14 @@
+ #[inline(always)]
+ pub fn PrivateValue(o: *const c_void) -> JSVal {
+     let ptrBits = o as usize as u64;
+-    #[cfg(target_pointer_width = "64")]
++    // Android arm64 uses tagged native heap pointers. Preserve the full
++    // pointer (including its top-byte tag) in SpiderMonkey private slots.
++    #[cfg(all(target_pointer_width = "64", target_os = "android", target_arch = "aarch64"))]
++    {
++        assert_eq!(ptrBits & 0x00FF000000000000, 0);
++        assert!(ptrBits <= ValueShiftedTag::MAX_DOUBLE as u64);
++    }
++    #[cfg(all(target_pointer_width = "64", not(all(target_os = "android", target_arch = "aarch64"))))]
+     assert_eq!(ptrBits & 0xFFFF000000000000, 0);
+     AsJSVal(ptrBits)
+ }
+@@ -500,7 +507,9 @@
+     #[inline(always)]
+     pub fn to_private(&self) -> *const c_void {
+         assert!(self.is_double());
+-        #[cfg(target_pointer_width = "64")]
++        #[cfg(all(target_pointer_width = "64", target_os = "android", target_arch = "aarch64"))]
++        assert_eq!(self.asBits() & 0x00FF000000000000, 0);
++        #[cfg(all(target_pointer_width = "64", not(all(target_os = "android", target_arch = "aarch64"))))]
+         assert_eq!(self.asBits() & 0xFFFF000000000000, 0);
+         self.asBits() as usize as *const c_void
+     }

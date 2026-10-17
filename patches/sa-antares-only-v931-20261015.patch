@@ -1,0 +1,472 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 3d53864..e5fe0f5 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -47,6 +47,8 @@ android {
+ 
+     buildTypes {
+         named("debug") {
++            // Separate lab identity: never overwrite the publisher-signed release.
++            applicationIdSuffix = ".antareslab"
+             multiDexEnabled = true
+             isMinifyEnabled = false
+             isShrinkResources = false
+@@ -83,6 +85,7 @@ android {
+ 
+     productFlavors {
+         create("solipsismBrowser") {
++            buildConfigField("boolean", "ANTARES_ONLY", "true")
+             dimension = "capabilities"
+             buildConfigField("boolean", "FULL_VERSION", "Boolean.parseBoolean(\"true\")")
+             buildConfigField("String", "RELEASE_SITE_URL", "\"https://kenneth-cho-infosec.github.io/Solipsism/\"")
+diff --git a/app/src/main/java/com/krystelligence/solipsism/BrowserApp.kt b/app/src/main/java/com/krystelligence/solipsism/BrowserApp.kt
+index 54df89f..510a273 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/BrowserApp.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/BrowserApp.kt
+@@ -59,6 +59,10 @@ class BrowserApp : Application() {
+ 
+     override fun onCreate() {
+         super.onCreate()
++        // Process-local fail-closed invariant. Other Android applications keep WebView.
++        if (BuildConfig.ANTARES_ONLY && Build.VERSION.SDK_INT >= 28) {
++            WebView.disableWebView()
++        }
+         // Seed Servo's profile dir before the first engine init so
+         // auth_cache/hsts_list/cookie_jar ENOENTs don't spam error logs.
+         runCatching { File(filesDir, "servo").mkdirs() }
+@@ -81,7 +85,7 @@ class BrowserApp : Application() {
+             cleanup.cleanup()
+         }
+ 
+-        if (Build.VERSION.SDK_INT >= 28) {
++        if (Build.VERSION.SDK_INT >= 28 && !BuildConfig.ANTARES_ONLY) {
+             if (getProcessName() == "$packageName:incognito") {
+                 File(dataDir, "app_webview_incognito").deleteRecursively()
+                 WebView.setDataDirectorySuffix("incognito")
+diff --git a/app/src/main/java/com/krystelligence/solipsism/browser/BrowserActivity.kt b/app/src/main/java/com/krystelligence/solipsism/browser/BrowserActivity.kt
+index d826471..15f1d32 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/browser/BrowserActivity.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/browser/BrowserActivity.kt
+@@ -1,5 +1,7 @@
+ package com.krystelligence.solipsism.browser
+ 
++import com.krystelligence.solipsism.BuildConfig
++
+ import com.krystelligence.solipsism.R
+ import com.krystelligence.solipsism.ThemableBrowserActivity
+ import com.krystelligence.solipsism.animation.AnimationUtils
+@@ -1038,7 +1040,7 @@ abstract class BrowserActivity : ThemableBrowserActivity(), BrowserContract.View
+ 
+         // A broken system WebView provider crashes the app on first use (#48).
+         // Fail early with guidance instead of an obscure native stack.
+-        if (!ensureWebViewProvider()) return
++        if (!BuildConfig.ANTARES_ONLY && !ensureWebViewProvider()) return
+ 
+         val tabConfiguration = TabConfiguration.SOLIPSISM
+         val bottomTabsBinding = if (tabConfiguration == TabConfiguration.DRAWER_BOTTOM) {
+@@ -1917,7 +1919,8 @@ abstract class BrowserActivity : ThemableBrowserActivity(), BrowserContract.View
+     }
+ 
+     override fun showAntaresCrashFallback() {
+-        snackbar(R.string.antares_crash_fallback)
++        snackbar(if (BuildConfig.ANTARES_ONLY) R.string.antares_crash_retry_required
++                else R.string.antares_crash_fallback)
+     }
+ 
+     override fun openVault() {
+diff --git a/app/src/main/java/com/krystelligence/solipsism/browser/BrowserPresenter.kt b/app/src/main/java/com/krystelligence/solipsism/browser/BrowserPresenter.kt
+index 5ccf108..0dfd6ef 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/browser/BrowserPresenter.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/browser/BrowserPresenter.kt
+@@ -1,5 +1,7 @@
+ package com.krystelligence.solipsism.browser
+ 
++import com.krystelligence.solipsism.BuildConfig
++
+ import android.app.Application
+ import android.graphics.Bitmap
+ 
+@@ -172,11 +174,11 @@ class BrowserPresenter @Inject constructor(
+         this.view = view
+         view.updateState(viewState)
+ 
+-        cookieAdministrator.adjustCookieSettings()
++        if (!BuildConfig.ANTARES_ONLY) cookieAdministrator.adjustCookieSettings()
+ 
+         // A native Antares crash kills the process before any Java callback
+-        // runs. If the previous launch died while starting Antares, fall back
+-        // to WebView once instead of crash-looping (#49).
++        // runs. The Antares-only build retains its native crash marker and
++        // displays an explicit failure; it never changes to WebView.
+         if (browserCorePreferences.consumePendingAntaresCrash()) {
+             this.view?.showAntaresCrashFallback()
+         }
+@@ -1502,6 +1504,7 @@ class BrowserPresenter @Inject constructor(
+     }
+ 
+     fun onBrowserCoreSelected(core: BrowserCore) {
++        if (BuildConfig.ANTARES_ONLY && core != BrowserCore.ANTARES) return
+         if (!viewIsResumed) {
+             // Debug Settings and the chooser are separate activities. Constructing and selecting
+             // remote SurfaceViews while the browser window is covered races its surface/input
+@@ -1516,6 +1519,10 @@ class BrowserPresenter @Inject constructor(
+     fun isUsingAntaresCore(): Boolean = browserCorePreferences.selectedCore == BrowserCore.ANTARES
+ 
+     private fun switchBrowserCore(core: BrowserCore) {
++        if (BuildConfig.ANTARES_ONLY && core != BrowserCore.ANTARES) {
++            view?.showBrowserCoreSwitchFailed()
++            return
++        }
+         val selectedIndex = currentTab?.let(model.tabsList::indexOf)?.takeIf { it >= 0 }
+         compositeDisposable += model.switchCore(core)
+             .observeOn(mainScheduler)
+diff --git a/app/src/main/java/com/krystelligence/solipsism/browser/data/CookieManagerRepository.kt b/app/src/main/java/com/krystelligence/solipsism/browser/data/CookieManagerRepository.kt
+index 0bb2959..9dbcdab 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/browser/data/CookieManagerRepository.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/browser/data/CookieManagerRepository.kt
+@@ -1,6 +1,7 @@
+ package com.krystelligence.solipsism.browser.data
+ 
+ import android.webkit.CookieManager
++import com.krystelligence.solipsism.BuildConfig
+ import android.webkit.ValueCallback
+ import androidx.annotation.MainThread
+ import java.net.URI
+@@ -37,7 +38,12 @@ sealed interface CookieOperationResult {
+ 
+ @MainThread
+ class CookieManagerRepository @Inject constructor() {
+-    private val cookieManager = CookieManager.getInstance()
++    private val cookieManager by lazy(LazyThreadSafetyMode.NONE) {
++        check(!BuildConfig.ANTARES_ONLY) {
++            "Antares cookie management must use the native engine; WebView access is prohibited"
++        }
++        CookieManager.getInstance()
++    }
+ 
+     fun listForUrl(url: String): List<BrowserCookie> =
+         parseCookieHeader(cookieManager.getCookie(url))
+diff --git a/app/src/main/java/com/krystelligence/solipsism/browser/di/Browser2Module.kt b/app/src/main/java/com/krystelligence/solipsism/browser/di/Browser2Module.kt
+index 9710d0f..f71e6dc 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/browser/di/Browser2Module.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/browser/di/Browser2Module.kt
+@@ -30,6 +30,8 @@ import android.app.Application
+ import android.content.Intent
+ import android.graphics.Bitmap
+ import android.webkit.WebSettings
++import com.krystelligence.solipsism.BuildConfig
++import com.krystelligence.solipsism.constant.MOBILE_USER_AGENT
+ import androidx.core.graphics.drawable.toBitmap
+ import dagger.Module
+ import dagger.Provides
+@@ -79,7 +81,7 @@ class Browser2Module {
+     @DefaultUserAgent
+     @Provides
+     fun providesDefaultUserAgent(application: Application): String =
+-        WebSettings.getDefaultUserAgent(application)
++        if (BuildConfig.ANTARES_ONLY) MOBILE_USER_AGENT else WebSettings.getDefaultUserAgent(application)
+ 
+ 
+     @Provides
+diff --git a/app/src/main/java/com/krystelligence/solipsism/browser/engine/BrowserCoreChooserActivity.kt b/app/src/main/java/com/krystelligence/solipsism/browser/engine/BrowserCoreChooserActivity.kt
+index b4c8232..2d9ded1 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/browser/engine/BrowserCoreChooserActivity.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/browser/engine/BrowserCoreChooserActivity.kt
+@@ -7,6 +7,7 @@ import android.graphics.drawable.GradientDrawable
+ import android.os.Build
+ import android.os.Bundle
+ import android.view.View
++import com.krystelligence.solipsism.BuildConfig
+ import android.view.Gravity
+ import android.view.HapticFeedbackConstants
+ import android.widget.FrameLayout
+@@ -77,7 +78,8 @@ class BrowserCoreChooserActivity : AppCompatActivity() {
+         enginePackage = AntaresEnginePackage(applicationContext)
+         launchBrowserAfterChoice = !intent.getBooleanExtra(EXTRA_MANAGE_ONLY, false)
+ 
+-        if (launchBrowserAfterChoice && preferences.onboardingComplete && selectionIsUsable()) {
++        if (launchBrowserAfterChoice && preferences.onboardingComplete && selectionIsUsable() &&
++            !(BuildConfig.ANTARES_ONLY && preferences.antaresCrashArmed)) {
+             launchBrowser()
+             return
+         }
+@@ -85,11 +87,14 @@ class BrowserCoreChooserActivity : AppCompatActivity() {
+         currentStep = savedInstanceState
+             ?.getString(STATE_STEP)
+             ?.let(SetupStep::valueOf)
+-            ?: if (launchBrowserAfterChoice) SetupStep.APPEARANCE else SetupStep.CORE
+-        selectedCore = savedInstanceState
+-            ?.getString(STATE_CORE)
+-            ?.let(BrowserCore::valueOf)
+-            ?: preferences.selectedCore
++            ?: if (launchBrowserAfterChoice && !(BuildConfig.ANTARES_ONLY && preferences.antaresCrashArmed))
++                SetupStep.APPEARANCE else SetupStep.CORE
++        selectedCore = if (BuildConfig.ANTARES_ONLY) {
++            BrowserCore.ANTARES
++        } else {
++            savedInstanceState?.getString(STATE_CORE)?.let(BrowserCore::valueOf)
++                ?: preferences.selectedCore
++        }
+         onBackPressedDispatcher.addCallback(
+             this,
+             object : OnBackPressedCallback(true) {
+@@ -258,7 +263,12 @@ class BrowserCoreChooserActivity : AppCompatActivity() {
+         webViewCard = findViewById(R.id.browser_core_webview_card)
+         antaresCard = findViewById(R.id.browser_core_antares_card)
+ 
+-        webViewCard.setOnClickListener { selectCore(BrowserCore.WEBVIEW) }
++        if (BuildConfig.ANTARES_ONLY) {
++            webViewCard.isEnabled = false
++            webViewCard.visibility = View.GONE
++        } else {
++            webViewCard.setOnClickListener { selectCore(BrowserCore.WEBVIEW) }
++        }
+         antaresCard.setOnClickListener { selectCore(BrowserCore.ANTARES) }
+         selectCore(selectedCore)
+         continueButton.setOnClickListener { confirmSelection() }
+@@ -285,8 +295,8 @@ class BrowserCoreChooserActivity : AppCompatActivity() {
+     }
+ 
+     private fun selectCore(core: BrowserCore) {
+-        selectedCore = core
+-        val webViewSelected = core == BrowserCore.WEBVIEW
++        selectedCore = if (BuildConfig.ANTARES_ONLY) BrowserCore.ANTARES else core
++        val webViewSelected = selectedCore == BrowserCore.WEBVIEW
+         webViewCard.isChecked = webViewSelected
+         antaresCard.isChecked = !webViewSelected
+         updateStatus()
+@@ -375,14 +385,16 @@ class BrowserCoreChooserActivity : AppCompatActivity() {
+     }
+ 
+     private fun commitSelection(core: BrowserCore) {
++        val effectiveCore = if (BuildConfig.ANTARES_ONLY) BrowserCore.ANTARES else core
++        // Persist independently of the browser receiver, which may not be running.
++        if (BuildConfig.ANTARES_ONLY || launchBrowserAfterChoice) preferences.select(effectiveCore)
+         if (launchBrowserAfterChoice) {
+-            preferences.select(core)
+             launchBrowser()
+         } else {
+             sendBroadcast(
+                 Intent(BrowserCoreSwitchRequest.ACTION)
+                     .setPackage(packageName)
+-                    .putExtra(BrowserCoreSwitchRequest.EXTRA_CORE, core.preferenceValue)
++                    .putExtra(BrowserCoreSwitchRequest.EXTRA_CORE, effectiveCore.preferenceValue)
+             )
+             finish()
+         }
+@@ -391,6 +403,8 @@ class BrowserCoreChooserActivity : AppCompatActivity() {
+     private fun updateStatus() {
+         val status = enginePackage.status()
+         statusView.text = when {
++            BuildConfig.ANTARES_ONLY && preferences.antaresCrashArmed ->
++                getString(R.string.antares_crash_retry_required)
+             status.usable -> getString(
+                 R.string.browser_core_antares_ready,
+                 status.versionName.orEmpty()
+diff --git a/app/src/main/java/com/krystelligence/solipsism/browser/engine/BrowserCorePreferences.kt b/app/src/main/java/com/krystelligence/solipsism/browser/engine/BrowserCorePreferences.kt
+index 2e830aa..76f0215 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/browser/engine/BrowserCorePreferences.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/browser/engine/BrowserCorePreferences.kt
+@@ -1,6 +1,7 @@
+ package com.krystelligence.solipsism.browser.engine
+ 
+ import android.content.Context
++import com.krystelligence.solipsism.BuildConfig
+ import androidx.core.content.edit
+ import javax.inject.Inject
+ import javax.inject.Singleton
+@@ -10,8 +11,11 @@ class BrowserCorePreferences @Inject constructor(context: Context) {
+     private val preferences = context.getSharedPreferences(FILE_NAME, Context.MODE_PRIVATE)
+ 
+     var selectedCore: BrowserCore
+-        get() = BrowserCore.fromPreference(preferences.getString(KEY_SELECTED_CORE, null))
+-        set(value) = preferences.edit { putString(KEY_SELECTED_CORE, value.preferenceValue) }
++        get() = if (BuildConfig.ANTARES_ONLY) BrowserCore.ANTARES
++                else BrowserCore.fromPreference(preferences.getString(KEY_SELECTED_CORE, null))
++        set(value) = preferences.edit {
++            putString(KEY_SELECTED_CORE, (if (BuildConfig.ANTARES_ONLY) BrowserCore.ANTARES else value).preferenceValue)
++        }
+ 
+     var onboardingComplete: Boolean
+         get() = preferences.getBoolean(KEY_ONBOARDING_COMPLETE, false)
+@@ -19,7 +23,7 @@ class BrowserCorePreferences @Inject constructor(context: Context) {
+ 
+     fun select(core: BrowserCore) {
+         preferences.edit {
+-            putString(KEY_SELECTED_CORE, core.preferenceValue)
++            putString(KEY_SELECTED_CORE, (if (BuildConfig.ANTARES_ONLY) BrowserCore.ANTARES else core).preferenceValue)
+             putBoolean(KEY_ONBOARDING_COMPLETE, true)
+         }
+     }
+@@ -47,6 +51,9 @@ class BrowserCorePreferences @Inject constructor(context: Context) {
+             antaresCrashArmed = false
+             return false
+         }
++        // Antares-only mode preserves the guard until a real successful page load.
++        // Never silently substitute WebView after a native panic.
++        if (BuildConfig.ANTARES_ONLY) return true
+         select(BrowserCore.WEBVIEW)
+         antaresCrashArmed = false
+         return true
+diff --git a/app/src/main/java/com/krystelligence/solipsism/browser/tab/AntaresTabAdapter.kt b/app/src/main/java/com/krystelligence/solipsism/browser/tab/AntaresTabAdapter.kt
+index c57000a..fa9f79c 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/browser/tab/AntaresTabAdapter.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/browser/tab/AntaresTabAdapter.kt
+@@ -11,7 +11,8 @@ import android.view.VelocityTracker
+ import android.view.View
+ import android.view.ViewConfiguration
+ import android.view.animation.DecelerateInterpolator
+-import android.webkit.WebSettings
++import com.krystelligence.solipsism.BuildConfig
++import com.krystelligence.solipsism.constant.MOBILE_USER_AGENT
+ import android.widget.FrameLayout
+ import androidx.activity.result.ActivityResult
+ import androidx.lifecycle.findViewTreeLifecycleOwner
+@@ -153,7 +154,7 @@ class AntaresTabAdapter private constructor(
+     private val destroyed = AtomicBoolean(false)
+     private val disposables = CompositeDisposable()
+     private var desktopAgentOverride = false
+-    private val providerUserAgent = WebSettings.getDefaultUserAgent(initialUrlResolver.context)
++    private val providerUserAgent = MOBILE_USER_AGENT // No WebView provider is initialized.
+ 
+     val contentView: AntaresSessionView = AntaresSessionView(
+         context = initialUrlResolver.context,
+@@ -166,7 +167,7 @@ class AntaresTabAdapter private constructor(
+         listener = this,
+     ).apply { id = this@AntaresTabAdapter.id }
+ 
+-    private val coordinateBridge = if (developerPreferences.antaresCoordinateBridgeEnabled) {
++    private val coordinateBridge = if (!BuildConfig.ANTARES_ONLY && developerPreferences.antaresCoordinateBridgeEnabled) {
+         AntaresCoordinateBridge(
+             context = initialUrlResolver.context,
+             sessionView = contentView,
+diff --git a/app/src/main/java/com/krystelligence/solipsism/preference/UserPreferencesExtensions.kt b/app/src/main/java/com/krystelligence/solipsism/preference/UserPreferencesExtensions.kt
+index 68bc594..be9bd4d 100644
+--- a/app/src/main/java/com/krystelligence/solipsism/preference/UserPreferencesExtensions.kt
++++ b/app/src/main/java/com/krystelligence/solipsism/preference/UserPreferencesExtensions.kt
+@@ -5,24 +5,14 @@ import com.krystelligence.solipsism.constant.DESKTOP_USER_AGENT
+ import com.krystelligence.solipsism.constant.MOBILE_USER_AGENT
+ import com.krystelligence.solipsism.constant.FOLDING_USER_AGENT
+ import android.app.Application
++import com.krystelligence.solipsism.BuildConfig
+ import android.webkit.WebSettings
+ 
+ /**
+  * Return the user agent chosen by the user or the custom user agent entered by the user.
+  */
+ fun UserPreferences.userAgent(application: Application): String =
+-    when (val choice = userAgentChoice) {
+-        1 -> if (chrompatibilityModeEnabled) {
+-            chromeCompatibilityUserAgent(WebSettings.getDefaultUserAgent(application))
+-        } else {
+-            WebSettings.getDefaultUserAgent(application)
+-        }
+-        2 -> DESKTOP_USER_AGENT
+-        3 -> MOBILE_USER_AGENT
+-        4 -> userAgentString.takeIf(String::isNotEmpty) ?: " "
+-        5 -> FOLDING_USER_AGENT
+-        else -> throw UnsupportedOperationException("Unknown userAgentChoice: $choice")
+-    }
++    userAgent(if (BuildConfig.ANTARES_ONLY) MOBILE_USER_AGENT else WebSettings.getDefaultUserAgent(application))
+ 
+ fun UserPreferences.userAgent(defaultUserAgent: String): String =
+     when (val choice = userAgentChoice) {
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 8c53589..c9ffb97 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -2,6 +2,7 @@
+ <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+ 
+     <string name="app_name">Solipsism Browser</string>
++    <string name="antares_crash_retry_required">Antares terminated unexpectedly. WebView will not be used. Continue to retry Antares.</string>
+     <string name="homepage_open_bookmark">Open %1$s</string>
+     <string name="action_new_tab">New tab</string>
+     <string name="action_share">Share</string>
+diff --git a/app/src/test/java/com/krystelligence/solipsism/browser/engine/BrowserCoreTest.kt b/app/src/test/java/com/krystelligence/solipsism/browser/engine/BrowserCoreTest.kt
+index e5e03e1..fb88bef 100644
+--- a/app/src/test/java/com/krystelligence/solipsism/browser/engine/BrowserCoreTest.kt
++++ b/app/src/test/java/com/krystelligence/solipsism/browser/engine/BrowserCoreTest.kt
+@@ -1,6 +1,7 @@
+ package com.krystelligence.solipsism.browser.engine
+ 
+ import android.content.Context
++import com.krystelligence.solipsism.BuildConfig
+ import org.assertj.core.api.Assertions.assertThat
+ import org.junit.Before
+ import org.junit.Test
+@@ -14,35 +15,60 @@ class BrowserCoreTest {
+ 
+     @Before
+     fun setUp() {
++        assertThat(BuildConfig.ANTARES_ONLY).isTrue()
+         context = RuntimeEnvironment.getApplication()
+         context.getSharedPreferences("browser_core", Context.MODE_PRIVATE).edit().clear().commit()
+     }
+ 
+     @Test
+-    fun `first install defaults to WebView without completing onboarding`() {
++    fun `first install defaults to Antares without completing onboarding`() {
+         val preferences = BrowserCorePreferences(context)
+-
+-        assertThat(preferences.selectedCore).isEqualTo(BrowserCore.WEBVIEW)
++        assertThat(preferences.selectedCore).isEqualTo(BrowserCore.ANTARES)
+         assertThat(preferences.onboardingComplete).isFalse()
+     }
+ 
+     @Test
+-    fun `unknown persisted core falls back to WebView`() {
+-        context.getSharedPreferences("browser_core", Context.MODE_PRIVATE)
+-            .edit()
+-            .putString("selected_core", "unknown")
+-            .commit()
+-
+-        assertThat(BrowserCorePreferences(context).selectedCore).isEqualTo(BrowserCore.WEBVIEW)
++    fun `unknown or legacy stored core cannot select WebView`() {
++        val raw = context.getSharedPreferences("browser_core", Context.MODE_PRIVATE)
++        for (legacy in listOf("unknown", "webview", "")) {
++            raw.edit().putString("selected_core", legacy).commit()
++            assertThat(BrowserCorePreferences(context).selectedCore).isEqualTo(BrowserCore.ANTARES)
++        }
+     }
+ 
+     @Test
+-    fun `selection is global and persisted`() {
+-        BrowserCorePreferences(context).select(BrowserCore.WEBVIEW)
+-
++    fun `Antares selection is global and persisted`() {
++        BrowserCorePreferences(context).select(BrowserCore.ANTARES)
+         val restored = BrowserCorePreferences(context)
+-        assertThat(restored.selectedCore).isEqualTo(BrowserCore.WEBVIEW)
++        assertThat(restored.selectedCore).isEqualTo(BrowserCore.ANTARES)
+         assertThat(restored.onboardingComplete).isTrue()
++        assertThat(context.getSharedPreferences("browser_core", Context.MODE_PRIVATE)
++            .getString("selected_core", null)).isEqualTo("antares")
++    }
++
++    @Test
++    fun `a WebView selection request cannot change the Antares preference`() {
++        val prefs = BrowserCorePreferences(context)
++        prefs.selectedCore = BrowserCore.WEBVIEW
++        assertThat(prefs.selectedCore).isEqualTo(BrowserCore.ANTARES)
++        prefs.select(BrowserCore.WEBVIEW)
++        assertThat(BrowserCorePreferences(context).selectedCore).isEqualTo(BrowserCore.ANTARES)
++        assertThat(context.getSharedPreferences("browser_core", Context.MODE_PRIVATE)
++            .getString("selected_core", null)).isEqualTo("antares")
+     }
+ 
++    @Test
++    fun `a native crash does not switch engines or clear the guard before page load`() {
++        val prefs = BrowserCorePreferences(context)
++        prefs.select(BrowserCore.ANTARES)
++        prefs.armAntaresCrashGuard()
++        assertThat(prefs.antaresCrashArmed).isTrue()
++        assertThat(prefs.consumePendingAntaresCrash()).isTrue()
++        assertThat(prefs.antaresCrashArmed).isTrue()
++        assertThat(prefs.selectedCore).isEqualTo(BrowserCore.ANTARES)
++        assertThat(context.getSharedPreferences("browser_core", Context.MODE_PRIVATE)
++            .getString("selected_core", null)).isEqualTo("antares")
++        prefs.disarmAntaresCrashGuard()
++        assertThat(prefs.antaresCrashArmed).isFalse()
++    }
+ }
